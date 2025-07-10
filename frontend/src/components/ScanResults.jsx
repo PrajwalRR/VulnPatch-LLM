@@ -1,0 +1,276 @@
+import React, { useState, useEffect } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { ArrowLeft, Download, Code, AlertTriangle, CheckCircle, XCircle, Clock } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism'
+
+const ScanResults = ({ scan: propScan, onBack }) => {
+  const { scanId } = useParams()
+  const navigate = useNavigate()
+  const [scan, setScan] = useState(propScan)
+  const [loading, setLoading] = useState(!propScan)
+  const [error, setError] = useState(null)
+  const [selectedService, setSelectedService] = useState(null)
+  const [generatingScript, setGeneratingScript] = useState(false)
+  const [patchScript, setPatchScript] = useState('')
+
+  useEffect(() => {
+    if (!propScan && scanId) {
+      setLoading(true)
+      fetch(`/api/scan/${scanId}`)
+        .then(res => res.ok ? res.json() : Promise.reject('Not found'))
+        .then(data => {
+          setScan(data)
+          setError(null)
+        })
+        .catch(err => {
+          setScan(null)
+          setError('No scan data found.')
+        })
+        .finally(() => setLoading(false))
+    }
+  }, [scanId, propScan])
+
+  const generatePatchScript = async (serviceIndex) => {
+    if (!scan) return
+    setGeneratingScript(true)
+    try {
+      const response = await fetch(`/api/generate-script/${scan.scan_id}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ service_index: serviceIndex }),
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setPatchScript(data.script)
+        setSelectedService(serviceIndex)
+      }
+    } catch (error) {
+      // Optionally handle error
+    } finally {
+      setGeneratingScript(false)
+    }
+  }
+
+  const getSeverityIcon = (severity) => {
+    switch (severity) {
+      case 'High':
+        return <AlertTriangle className="h-5 w-5 text-danger-600" />
+      case 'Medium':
+        return <XCircle className="h-5 w-5 text-warning-600" />
+      case 'Low':
+        return <CheckCircle className="h-5 w-5 text-success-600" />
+      default:
+        return <Clock className="h-5 w-5 text-gray-600" />
+    }
+  }
+
+  const getSeverityColor = (severity) => {
+    switch (severity) {
+      case 'High':
+        return 'severity-high'
+      case 'Medium':
+        return 'severity-medium'
+      case 'Low':
+        return 'severity-low'
+      default:
+        return 'bg-gray-100 text-gray-800 border-gray-200'
+    }
+  }
+
+  const exportReport = () => {
+    if (!scan) return
+    const report = `\n# Vulnerability Patch Management Report\n\n**Scan ID:** ${scan.scan_id}\n**Timestamp:** ${new Date(scan.timestamp).toLocaleString()}\n\n## Summary\n- Total Services: ${scan.summary.total_services}\n- High Risk: ${scan.summary.high_risk_count}\n- Medium Risk: ${scan.summary.medium_risk_count}\n- Low Risk: ${scan.summary.low_risk_count}\n\n## Services Analysis\n\n${scan.services.map((service, index) => `\n### ${service.service} (${service.version})\n- **IP:** ${service.ip}\n- **Port:** ${service.port}\n- **Severity:** ${service.severity}\n\n**Recommendation:**\n${service.recommendation}\n\n${service.cve_info.length > 0 ? `\n**Known CVEs:**\n${service.cve_info.map(cve => `- ${cve}`).join('\\n')}\n` : ''}\n\n---\n`).join('\\n')}\n    `
+    const blob = new Blob([report], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `vulnerability-report-${scan.scan_id}.md`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  if (loading) {
+    return (
+      <div className="text-center py-12">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 mx-auto"></div>
+        <p className="mt-4 text-gray-600">Loading scan results...</p>
+      </div>
+    )
+  }
+  if (error) {
+    return (
+      <div className="text-center py-12 text-danger-600">{error}</div>
+    )
+  }
+  if (!scan) {
+    return (
+      <div className="text-center py-12 text-gray-600">No scan data found.</div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-4">
+          <button
+            onClick={() => navigate('/')}
+            className="flex items-center space-x-2 text-gray-600 hover:text-gray-900"
+          >
+            <ArrowLeft className="h-5 w-5" />
+            <span>Back to Dashboard</span>
+          </button>
+        </div>
+        
+        <div className="flex items-center space-x-4">
+          <button
+            onClick={exportReport}
+            className="btn-secondary flex items-center space-x-2"
+          >
+            <Download className="h-5 w-5" />
+            <span>Export Report</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Scan Summary */}
+      <div className="card">
+        <h1 className="text-2xl font-bold text-gray-900 mb-4">Scan Results</h1>
+        
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+          <div className="text-center p-4 bg-gray-50 rounded-lg">
+            <p className="text-2xl font-bold text-gray-900">{scan.summary.total_services}</p>
+            <p className="text-sm text-gray-600">Total Services</p>
+          </div>
+          <div className="text-center p-4 bg-danger-50 rounded-lg">
+            <p className="text-2xl font-bold text-danger-600">{scan.summary.high_risk_count}</p>
+            <p className="text-sm text-danger-600">High Risk</p>
+          </div>
+          <div className="text-center p-4 bg-warning-50 rounded-lg">
+            <p className="text-2xl font-bold text-warning-600">{scan.summary.medium_risk_count}</p>
+            <p className="text-sm text-warning-600">Medium Risk</p>
+          </div>
+          <div className="text-center p-4 bg-success-50 rounded-lg">
+            <p className="text-2xl font-bold text-success-600">{scan.summary.low_risk_count}</p>
+            <p className="text-sm text-success-600">Low Risk</p>
+          </div>
+        </div>
+
+        <div className="text-sm text-gray-600">
+          <strong>Scan ID:</strong> {scan.scan_id} | 
+          <strong>Timestamp:</strong> {new Date(scan.timestamp).toLocaleString()}
+        </div>
+      </div>
+
+      {/* Services List */}
+      <div className="space-y-4">
+        {scan.services.map((service, index) => (
+          <div key={index} className="card">
+            <div className="flex items-start justify-between">
+              <div className="flex-1">
+                <div className="flex items-center space-x-3 mb-3">
+                  {getSeverityIcon(service.severity)}
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {service.service} {service.version}
+                  </h3>
+                  <span className={`px-3 py-1 text-sm font-medium rounded-full border ${getSeverityColor(service.severity)}`}>
+                    {service.severity}
+                  </span>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <p className="text-sm text-gray-600">IP Address</p>
+                    <p className="font-medium">{service.ip}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600">Port</p>
+                    <p className="font-medium">{service.port}</p>
+                  </div>
+                </div>
+
+                {service.cve_info.length > 0 && (
+                  <div className="mb-4">
+                    <p className="text-sm font-medium text-gray-900 mb-2">Known CVEs:</p>
+                    <div className="space-y-1">
+                      {service.cve_info.map((cve, cveIndex) => (
+                        <div key={cveIndex} className="text-sm bg-red-50 border border-red-200 rounded p-2">
+                          {cve}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="mb-4">
+                  <p className="text-sm font-medium text-gray-900 mb-2">Recommendation:</p>
+                  <div className="prose prose-sm max-w-none">
+                    <ReactMarkdown>{service.recommendation}</ReactMarkdown>
+                  </div>
+                </div>
+              </div>
+
+              <div className="ml-4">
+                <button
+                  onClick={() => generatePatchScript(index)}
+                  disabled={generatingScript}
+                  className="btn-primary flex items-center space-x-2"
+                >
+                  <Code className="h-4 w-4" />
+                  <span>{generatingScript && selectedService === index ? 'Generating...' : 'Generate Script'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Patch Script */}
+            {selectedService === index && patchScript && (
+              <div className="mt-6 border-t pt-6">
+                <h4 className="text-lg font-semibold text-gray-900 mb-3">Automated Patch Script</h4>
+                <div className="bg-gray-900 rounded-lg overflow-hidden">
+                  <SyntaxHighlighter
+                    language="bash"
+                    style={tomorrow}
+                    customStyle={{
+                      margin: 0,
+                      padding: '1rem',
+                      fontSize: '0.875rem',
+                    }}
+                  >
+                    {patchScript}
+                  </SyntaxHighlighter>
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <button
+                    onClick={() => {
+                      const blob = new Blob([patchScript], { type: 'text/plain' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `patch-${service.service}-${service.version}.sh`
+                      document.body.appendChild(a)
+                      a.click()
+                      document.body.removeChild(a)
+                      URL.revokeObjectURL(url)
+                    }}
+                    className="btn-secondary flex items-center space-x-2"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Download Script</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export default ScanResults 
