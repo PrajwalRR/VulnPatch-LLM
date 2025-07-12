@@ -1,9 +1,41 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { BarChart3, Upload, Clock, AlertTriangle, CheckCircle, XCircle } from 'lucide-react'
+import { useAuth } from './AuthContext'
+import FileUpload from './FileUpload'
 
-const Dashboard = ({ scans }) => {
+const Dashboard = () => {
+  const { token } = useAuth();
   const navigate = useNavigate()
+  const [scans, setScans] = useState([])
+  const [loading, setLoading] = useState(false)
+
+  const fetchScans = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/scans', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      })
+      const data = await response.json()
+      setScans(data.scans || [])
+    } catch (error) {
+      setScans([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchScans()
+    // eslint-disable-next-line
+  }, [token])
+
+  const handleScanComplete = () => {
+    fetchScans()
+  }
+
   const totalScans = scans.length
   const totalServices = scans.reduce((sum, scan) => sum + (scan.summary?.total_services || 0), 0)
   const highRiskCount = scans.reduce((sum, scan) => sum + (scan.summary?.high_risk_count || 0), 0)
@@ -119,7 +151,9 @@ const Dashboard = ({ scans }) => {
           )}
         </div>
 
-        {scans.length === 0 ? (
+        {loading ? (
+          <div className="text-center py-12 text-gray-600">Loading scans...</div>
+        ) : scans.length === 0 ? (
           <div className="text-center py-12">
             <BarChart3 className="h-12 w-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">No scans yet</h3>

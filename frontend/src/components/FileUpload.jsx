@@ -1,10 +1,13 @@
 import React, { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { Upload, FileText, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
+import { useAuth } from './AuthContext'
 
-const FileUpload = ({ onScanComplete, loading, setLoading }) => {
+const FileUpload = ({ onScanComplete }) => {
   const [uploadStatus, setUploadStatus] = useState(null)
   const [error, setError] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const { token } = useAuth();
 
   const onDrop = useCallback(async (acceptedFiles) => {
     const file = acceptedFiles[0]
@@ -25,6 +28,9 @@ const FileUpload = ({ onScanComplete, loading, setLoading }) => {
     try {
       const response = await fetch('/api/parse-scan', {
         method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
         body: formData,
       })
 
@@ -32,7 +38,12 @@ const FileUpload = ({ onScanComplete, loading, setLoading }) => {
 
       if (response.ok) {
         setUploadStatus('success')
-        onScanComplete(data)
+        if (onScanComplete) onScanComplete(data)
+        setTimeout(() => {
+          if (data.scan_id) {
+            window.location.href = `/scan/${data.scan_id}`
+          }
+        }, 1500)
       } else {
         setError(data.message || 'Upload failed')
         setUploadStatus('error')
@@ -43,7 +54,7 @@ const FileUpload = ({ onScanComplete, loading, setLoading }) => {
     } finally {
       setLoading(false)
     }
-  }, [onScanComplete, setLoading])
+  }, [onScanComplete, token])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,

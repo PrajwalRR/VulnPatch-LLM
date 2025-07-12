@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +13,11 @@ from typing import List, Dict, Any
 import requests
 from pydantic import BaseModel
 import uuid
+import httpx
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from collections import Counter, defaultdict
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -28,8 +33,112 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Set OpenAI API Key
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Set Groq API Key
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# User auth settings
+SECRET_KEY = "supersecretkey"  # In production, use a secure env var
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
+
+# In-memory user store for demo
+users_db = {}
+
+class User(BaseModel):
+    username: str
+    email: str
+    full_name: str = ""
+    disabled: bool = False
+
+class UserInDB(User):
+    hashed_password: str
+
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+    full_name: str = ""
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+# Auth utility functions
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def get_user(username: str):
+    user = users_db.get(username)
+    if user:
+        return UserInDB(**user)
+    return None
+
+def authenticate_user(username: str, password: str):
+    user = get_user(username)
+    if not user or not verify_password(password, user.hashed_password):
+        return False
+    return user
+
+def create_access_token(data: dict):
+    from datetime import timedelta
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = get_user(username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+# Registration endpoint
+@app.post("/api/register", response_model=User)
+def register(user: UserCreate):
+    if user.username in users_db:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    hashed_password = get_password_hash(user.password)
+    users_db[user.username] = {
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "disabled": False,
+        "hashed_password": hashed_password
+    }
+    return User(**users_db[user.username])
+
+# Login endpoint
+@app.post("/api/login", response_model=Token)
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    access_token = create_access_token(data={"sub": user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# Get current user endpoint
+@app.get("/api/me", response_model=User)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
 
 # Data models
 class ServiceInfo(BaseModel):
@@ -48,7 +157,11 @@ class ScanResult(BaseModel):
     summary: Dict[str, Any]
 
 # In-memory storage for demo (use database in production)
+# Now stores scan_id: { ...scan_result, 'username': username }
 scan_results = {}
+
+class ScriptRequest(BaseModel):
+    service_index: int
 
 def parse_nmap_xml(xml_content: str) -> List[Dict[str, str]]:
     """Parse Nmap XML and extract service information"""
@@ -128,13 +241,11 @@ def determine_severity(service: str, version: str, cve_count: int) -> str:
         return "Low"
 
 async def get_llm_recommendation(service: str, version: str, cve_info: List[str]) -> str:
-    """Get patch recommendations from LLM"""
-    if not openai.api_key:
-        return "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."
-    
+    """Get patch recommendations from LLM (Groq)"""
+    if not GROQ_API_KEY:
+        return "Groq API key not configured. Please set GROQ_API_KEY environment variable."
     try:
         cve_text = "\n".join(cve_info) if cve_info else "No known CVEs found"
-        
         prompt = f"""
 You are a cybersecurity expert. Analyze the following service and provide detailed patch recommendations:
 
@@ -150,26 +261,31 @@ Please provide:
 
 Format your response in a clear, actionable manner.
 """
-
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama3-70b-8192",
+            "messages": [
                 {"role": "system", "content": "You are a cybersecurity expert specializing in vulnerability assessment and patch management."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000,
-            temperature=0.3
-        )
-        
-        return response['choices'][0]['message']['content']
+            "max_tokens": 1000,
+            "temperature": 0.3
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            return data['choices'][0]['message']['content']
     except Exception as e:
         return f"Error getting LLM recommendation: {str(e)}"
 
 async def generate_patch_script(service: str, version: str) -> str:
-    """Generate automated patch script using LLM"""
-    if not openai.api_key:
-        return "# OpenAI API key not configured"
-    
+    """Generate automated patch script using LLM (Groq)"""
+    if not GROQ_API_KEY:
+        return "# Groq API key not configured"
     try:
         prompt = f"""
 Generate a Linux shell script to patch/upgrade {service} version {version}.
@@ -182,23 +298,29 @@ The script should:
 
 Provide only the shell script code, no explanations.
 """
-
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama3-70b-8192",
+            "messages": [
                 {"role": "system", "content": "You are a DevOps expert. Generate only shell script code."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=800,
-            temperature=0.2
-        )
-        
-        return response['choices'][0]['message']['content']
+            "max_tokens": 800,
+            "temperature": 0.2
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            return data['choices'][0]['message']['content']
     except Exception as e:
         return f"# Error generating script: {str(e)}"
 
 @app.post("/api/parse-scan")
-async def parse_scan(file: UploadFile = File(...)):
+async def parse_scan(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     """Parse Nmap XML file and generate vulnerability report"""
     if not file.filename.endswith('.xml'):
         raise HTTPException(status_code=400, detail="File must be an XML file")
@@ -259,13 +381,14 @@ async def parse_scan(file: UploadFile = File(...)):
             "low_risk_count": severity_counts.get("Low", 0)
         }
         
-        # Store results
-        scan_results[scan_id] = ScanResult(
-            scan_id=scan_id,
-            timestamp=timestamp,
-            services=processed_services,
-            summary=summary
-        )
+        # Store results with username
+        scan_results[scan_id] = {
+            "scan_id": scan_id,
+            "timestamp": timestamp,
+            "services": processed_services,
+            "summary": summary,
+            "username": current_user.username
+        }
         
         return {
             "status": "success",
@@ -279,24 +402,27 @@ async def parse_scan(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 @app.get("/api/scan/{scan_id}")
-async def get_scan_result(scan_id: str):
+async def get_scan_result(scan_id: str, current_user: User = Depends(get_current_user)):
     """Get scan results by ID"""
-    if scan_id not in scan_results:
+    scan = scan_results.get(scan_id)
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    
-    return scan_results[scan_id]
+    if scan["username"] != current_user.username:
+        raise HTTPException(status_code=403, detail="Not authorized to view this scan")
+    return scan
 
 @app.post("/api/generate-script/{scan_id}")
-async def generate_script(scan_id: str, service_index: int):
-    """Generate patch script for specific service"""
-    if scan_id not in scan_results:
+async def generate_script(scan_id: str, req: ScriptRequest, current_user: User = Depends(get_current_user)):
+    scan = scan_results.get(scan_id)
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    
-    scan = scan_results[scan_id]
-    if service_index >= len(scan.services):
+    if scan["username"] != current_user.username:
+        raise HTTPException(status_code=403, detail="Not authorized to access this scan")
+    service_index = req.service_index
+    if service_index >= len(scan["services"]):
         raise HTTPException(status_code=400, detail="Invalid service index")
     
-    service = scan.services[service_index]
+    service = scan["services"][service_index]
     script = await generate_patch_script(service.service, service.version)
     
     return {
@@ -306,27 +432,70 @@ async def generate_script(scan_id: str, service_index: int):
     }
 
 @app.get("/api/scans")
-async def list_scans():
-    """List all scan results"""
+async def list_scans(current_user: User = Depends(get_current_user)):
+    """List all scan results for the current user"""
     return {
         "scans": [
             {
-                "scan_id": scan_id,
-                "timestamp": scan.timestamp,
-                "summary": scan.summary
+                "scan_id": scan["scan_id"],
+                "timestamp": scan["timestamp"],
+                "summary": scan["summary"]
             }
-            for scan_id, scan in scan_results.items()
+            for scan in scan_results.values() if scan["username"] == current_user.username
         ]
     }
 
 @app.delete("/api/scan/{scan_id}")
-async def delete_scan(scan_id: str):
+async def delete_scan(scan_id: str, current_user: User = Depends(get_current_user)):
     """Delete scan result"""
-    if scan_id not in scan_results:
+    scan = scan_results.get(scan_id)
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    if scan["username"] != current_user.username:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this scan")
     
     del scan_results[scan_id]
     return {"status": "deleted"}
+
+@app.get("/api/stats/summary")
+async def stats_summary(current_user: User = Depends(get_current_user)):
+    user_scans = [scan for scan in scan_results.values() if scan["username"] == current_user.username]
+    total_scans = len(user_scans)
+    total_services = sum(scan["summary"]["total_services"] for scan in user_scans)
+    risk_counts = Counter()
+    for scan in user_scans:
+        for sev, count in scan["summary"]["severity_breakdown"].items():
+            risk_counts[sev] += count
+    return {
+        "total_scans": total_scans,
+        "total_services": total_services,
+        "risk_breakdown": dict(risk_counts)
+    }
+
+@app.get("/api/stats/timeline")
+async def stats_timeline(current_user: User = Depends(get_current_user)):
+    user_scans = [scan for scan in scan_results.values() if scan["username"] == current_user.username]
+    timeline = []
+    for scan in sorted(user_scans, key=lambda s: s["timestamp"]):
+        timeline.append({
+            "timestamp": scan["timestamp"],
+            "total_services": scan["summary"]["total_services"],
+            "high": scan["summary"].get("high_risk_count", 0),
+            "medium": scan["summary"].get("medium_risk_count", 0),
+            "low": scan["summary"].get("low_risk_count", 0)
+        })
+    return {"timeline": timeline}
+
+@app.get("/api/stats/top-services")
+async def stats_top_services(current_user: User = Depends(get_current_user)):
+    user_scans = [scan for scan in scan_results.values() if scan["username"] == current_user.username]
+    service_counter = Counter()
+    for scan in user_scans:
+        for svc in scan["services"]:
+            key = f"{svc.service} {svc.version}" if svc.version else svc.service
+            service_counter[key] += 1
+    top_services = service_counter.most_common(10)
+    return {"top_services": [{"service": s, "count": c} for s, c in top_services]}
 
 if __name__ == "__main__":
     import uvicorn
