@@ -163,6 +163,15 @@ scan_results = {}
 class ScriptRequest(BaseModel):
     service_index: int
 
+class ChatMessage(BaseModel):
+    message: str
+    scan_id: str | None = None
+    service_index: int | None = None
+
+class ChatResponse(BaseModel):
+    response: str
+    timestamp: str
+
 def parse_nmap_xml(xml_content: str) -> List[Dict[str, str]]:
     """Parse Nmap XML and extract service information"""
     try:
@@ -496,6 +505,85 @@ async def stats_top_services(current_user: User = Depends(get_current_user)):
             service_counter[key] += 1
     top_services = service_counter.most_common(10)
     return {"top_services": [{"service": s, "count": c} for s, c in top_services]}
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_with_ai(chat_msg: ChatMessage, current_user: User = Depends(get_current_user)):
+    """Chat with AI about vulnerabilities and recommendations"""
+    print(f"Received chat message: {chat_msg}")  # Debug log
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="Groq API key not configured")
+    
+    try:
+        # Build context from scan data if provided
+        context = ""
+        if chat_msg.scan_id:
+            scan = scan_results.get(chat_msg.scan_id)
+            if scan and scan["username"] == current_user.username:
+                if chat_msg.service_index is not None and chat_msg.service_index < len(scan["services"]):
+                    service = scan["services"][chat_msg.service_index]
+                    context = f"""
+Current Scan Context:
+- Service: {service.service}
+- Version: {service.version}
+- IP: {service.ip}
+- Port: {service.port}
+- Severity: {service.severity}
+- CVEs: {', '.join(service.cve_info) if service.cve_info else 'None'}
+- Current Recommendation: {service.recommendation[:200]}...
+"""
+                else:
+                    context = f"""
+Current Scan Context:
+- Total Services: {scan['summary']['total_services']}
+- High Risk: {scan['summary'].get('high_risk_count', 0)}
+- Medium Risk: {scan['summary'].get('medium_risk_count', 0)}
+- Low Risk: {scan['summary'].get('low_risk_count', 0)}
+"""
+
+        prompt = f"""
+You are a cybersecurity expert AI assistant for VulnPatch-LLM, a vulnerability management platform. 
+You help users understand security vulnerabilities, provide detailed explanations, and offer actionable advice.
+
+{context}
+
+User Question: {chat_msg.message}
+
+Please provide a clear, helpful response that includes:
+- Technical explanation in simple terms
+- Specific actionable recommendations
+- Security best practices
+- Risk assessment if applicable
+
+Format your response in a clean, readable way. Use bullet points for lists and keep paragraphs short. Avoid excessive markdown formatting - just use basic formatting like **bold** for emphasis and bullet points for lists.
+"""
+
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama3-70b-8192",
+            "messages": [
+                {"role": "system", "content": "You are a cybersecurity expert AI assistant specializing in vulnerability assessment, patch management, and security best practices. Provide clear, actionable advice."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.3
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            ai_response = data['choices'][0]['message']['content']
+            
+            return ChatResponse(
+                response=ai_response,
+                timestamp=datetime.now().isoformat()
+            )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

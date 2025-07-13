@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { BarChart3, Upload, Clock, AlertTriangle, CheckCircle, XCircle } from 'lucide-react'
+import { BarChart3, Upload, Clock, AlertTriangle, CheckCircle, XCircle, MessageCircle } from 'lucide-react'
 import { useAuth } from './AuthContext'
 import FileUpload from './FileUpload'
 
-const Dashboard = () => {
+const Dashboard = ({ openChat }) => {
   const { token } = useAuth();
   const navigate = useNavigate()
   const [scans, setScans] = useState([])
@@ -134,6 +134,15 @@ const Dashboard = () => {
             <Upload className="h-5 w-5" />
             <span>Upload New Scan</span>
           </Link>
+          {openChat && (
+            <button
+              onClick={() => openChat()}
+              className="btn-secondary flex items-center space-x-2"
+            >
+              <MessageCircle className="h-5 w-5" />
+              <span>Chat with AI</span>
+            </button>
+          )}
         </div>
       </div>
 

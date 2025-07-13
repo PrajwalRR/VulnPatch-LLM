@@ -1,4 +1,4 @@
-import React, { useContext } from 'react'
+import React, { useContext, useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Shield, Upload, FileText, Settings, BarChart3, Download, AlertTriangle, CheckCircle, XCircle } from 'lucide-react'
 import FileUpload from './components/FileUpload'
@@ -10,6 +10,8 @@ import Login from './components/Login'
 import Signup from './components/Signup'
 import { AuthProvider, useAuth } from './components/AuthContext'
 import Analytics from './components/Analytics'
+import ChatBot from './components/ChatBot'
+import ChatButton from './components/ChatButton'
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth();
@@ -21,6 +23,18 @@ function RequireAuth({ children }) {
 
 function AppRoutes() {
   const { user } = useAuth();
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatContext, setChatContext] = useState({ scanId: null, serviceIndex: null });
+
+  const openChat = (scanId = null, serviceIndex = null) => {
+    setChatContext({ scanId, serviceIndex });
+    setIsChatOpen(true);
+  };
+
+  const closeChat = () => {
+    setIsChatOpen(false);
+  };
+
   return (
     <div className="relative min-h-screen flex flex-col overflow-x-hidden" style={{ background: 'linear-gradient(135deg, #e0e7ff 0%, #f0fdfa 40%, #fef9c3 100%)' }}>
       {/* Animated Gradient Overlay */}
@@ -32,18 +46,31 @@ function AppRoutes() {
       {/* Decorative Gradient Circles */}
       <div className="absolute top-0 left-0 w-72 h-72 bg-gradient-to-br from-primary-200 to-blue-200 rounded-full opacity-30 blur-2xl -z-10 animate-float-slow" style={{top: '-5rem', left: '-5rem'}} />
       <div className="absolute bottom-0 right-0 w-96 h-96 bg-gradient-to-tr from-blue-200 to-purple-200 rounded-full opacity-20 blur-2xl -z-10 animate-float-slower" style={{bottom: '-6rem', right: '-6rem'}} />
-      <Navbar />
+      <Navbar openChat={openChat} />
       <div className="container mx-auto px-4 py-8">
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
-          <Route path="/dashboard" element={<RequireAuth><Dashboard scans={[]} /></RequireAuth>} />
+          <Route path="/dashboard" element={<RequireAuth><Dashboard scans={[]} openChat={openChat} /></RequireAuth>} />
           <Route path="/upload" element={<RequireAuth><FileUpload /></RequireAuth>} />
-          <Route path="/scan/:scanId" element={<RequireAuth><ScanResults /></RequireAuth>} />
+          <Route path="/scan/:scanId" element={<RequireAuth><ScanResults openChat={openChat} /></RequireAuth>} />
           <Route path="/analytics" element={<RequireAuth><Analytics /></RequireAuth>} />
         </Routes>
       </div>
+      
+      {/* Chat Components */}
+      {user && (
+        <>
+          <ChatButton onClick={() => openChat()} isOpen={isChatOpen} />
+          <ChatBot 
+            isOpen={isChatOpen}
+            onClose={closeChat}
+            scanId={chatContext.scanId}
+            serviceIndex={chatContext.serviceIndex}
+          />
+        </>
+      )}
       {/* Custom Animations */}
       <style>{`
         .animate-bounce-slow {
